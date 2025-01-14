@@ -13,15 +13,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Constants and configurations using environment variables
+# Constants and configurations
 SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/documents']
-SERVICE_ACCOUNT_JSON = os.getenv('SERVICE_ACCOUNT_JSON')  # Store JSON string in Heroku env vars
-TEMPLATE_FOLDER_ID = os.getenv('TEMPLATE_FOLDER_ID')  # Store folder ID in Heroku env vars
+SERVICE_ACCOUNT_JSON = os.getenv('SERVICE_ACCOUNT_JSON')
+TEMPLATE_FOLDER_ID = os.getenv('TEMPLATE_FOLDER_ID')
 PLACEHOLDER_FILE = "placeholders.json"
 
 # Initialize Google API clients
 try:
-    # Parse the service account JSON from the environment variable
     creds = service_account.Credentials.from_service_account_info(
         json.loads(SERVICE_ACCOUNT_JSON),
         scopes=SCOPES
@@ -33,7 +32,6 @@ except Exception as e:
 
 # Utility Functions
 def get_templates_from_folder(service, folder_id):
-    """Fetch the list of Google Docs templates from a specific Google Drive folder."""
     try:
         query = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.document'"
         results = service.files().list(q=query, fields="files(id, name)").execute()
@@ -44,7 +42,6 @@ def get_templates_from_folder(service, folder_id):
         return {}
 
 def fetch_placeholders(document_id, docs_service):
-    """Fetch placeholders from a Google Document."""
     try:
         document = docs_service.documents().get(documentId=document_id).execute()
         placeholders = []
@@ -75,7 +72,6 @@ def fetch_placeholders(document_id, docs_service):
         return []
 
 def save_placeholders(file_path, placeholders, doc_id):
-    """Save placeholders in a JSON file."""
     if os.path.exists(file_path):
         with open(file_path, "r") as file:
             data = json.load(file)
@@ -88,7 +84,6 @@ def save_placeholders(file_path, placeholders, doc_id):
         json.dump(data, file)
 
 def load_placeholders(file_path, doc_id):
-    """Load placeholders from a JSON file."""
     if os.path.exists(file_path):
         with open(file_path, "r") as file:
             data = json.load(file)
@@ -122,7 +117,6 @@ def split_legal_description(legal_description):
     return parts[:3]
 
 def replace_placeholders(document_id, placeholders, data, service):
-    """Replace placeholders with values, handle legal_description."""
     requests = []
     for key in placeholders:
         if key == "legal_description":
@@ -145,7 +139,6 @@ def replace_placeholders(document_id, placeholders, data, service):
         st.error(f"Error replacing placeholders in document {document_id}: {e}")
 
 def export_to_pdf_and_delete(drive_service, document_id, folder_id, file_name):
-    """Export a Google Docs file to PDF and delete the original document."""
     try:
         pdf_data = drive_service.files().export(fileId=document_id, mimeType='application/pdf').execute()
         pdf_file_metadata = {
@@ -167,48 +160,27 @@ def create_contract_on_google_docs(drive_service, docs_service, folder_id, templ
 # Fetch templates for dropdown
 templates = get_templates_from_folder(drive_service, TEMPLATE_FOLDER_ID)
 
-# Streamlit App Logic
-st.title("Automated Contract Generator")
-selected_template = st.selectbox("Select a template for contract generation", options=["Select a template"] + list(templates.keys()))
+# Page Routing Using URL Parameters
+query_params = st.experimental_get_query_params()
+page = query_params.get("page", ["import"])[0]
 
-if selected_template != "Select a template":
-    doc_id = templates[selected_template]
-    placeholders = load_placeholders(PLACEHOLDER_FILE, doc_id)
-    if not placeholders:
-        placeholders = fetch_placeholders(doc_id, docs_service)
-        save_placeholders(PLACEHOLDER_FILE, placeholders, doc_id)
+if page == "import":
+    st.title("Import CSV for Contract Generation")
+    selected_template = st.selectbox("Select a template for contract generation", options=["Select a template"] + list(templates.keys()))
+    if selected_template != "Select a template":
+        doc_id = templates[selected_template]
+        placeholders = load_placeholders(PLACEHOLDER_FILE, doc_id)
+        if not placeholders:
+            placeholders = fetch_placeholders(doc_id, docs_service)
+            save_placeholders(PLACEHOLDER_FILE, placeholders, doc_id)
+        uploaded_file = st.file_uploader("Upload a CSV file", type="csv")
+        # Implement CSV logic here...
 
-    uploaded_file = st.file_uploader("Upload a CSV file", type="csv")
-    if uploaded_file:
-        df = pd.read_csv(uploaded_file, dtype=str).fillna("")
-        if "row_index" not in st.session_state:
-            st.session_state.row_index = 0
-        if "clean_data" not in st.session_state:
-            st.session_state.clean_data = []
+elif page == "manual":
+    st.title("Manually Input Data for Contract Generation")
+    selected_template = st.selectbox("Select a template for manual input", options=["Select a template"] + list(templates.keys()))
+    # Implement Manual input logic here...
 
-        current_index = st.session_state.row_index
-        if current_index < len(df):
-            current_row = df.iloc[current_index].to_dict()
-            st.subheader(f"Editing Row {current_index + 1} of {len(df)}")
-            with st.form(key=f"form_row_{current_index}"):
-                edited_row = {ph: st.text_input(ph.replace("_", " ").title(), value=current_row.get(ph, "")) for ph in placeholders if ph != "legal_description"}
-                edited_row["legal_description"] = st.text_area("Legal Description", value=current_row.get("legal_description", ""))
-                if st.form_submit_button("Save and Next"):
-                    if all(value.strip() for value in edited_row.values()):
-                        st.session_state.clean_data.append(edited_row)
-                        st.session_state.row_index += 1
-                        st.rerun()
-                    else:
-                        st.error("All fields are required.")
-        else:
-            st.success("All rows edited. Generating contracts...")
-            if st.button("Generate Contracts"):
-                folder_id = drive_service.files().create(
-                    body={'name': f"[AUTOGENERATED]_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}", 
-                          'mimeType': 'application/vnd.google-apps.folder', 
-                          'parents': [TEMPLATE_FOLDER_ID]}).execute()['id']
-                progress = st.progress(0)
-                for idx, row in enumerate(st.session_state.clean_data):
-                    create_contract_on_google_docs(drive_service, docs_service, folder_id, doc_id, placeholders, row)
-                    progress.progress((idx + 1) / len(st.session_state.clean_data))
-                st.success(f"Contracts saved in folder: [Open in Google Drive](https://drive.google.com/drive/folders/{folder_id})")
+# Add navigation links
+st.sidebar.markdown("[Import CSV](?page=import)")
+st.sidebar.markdown("[Manually Input Data](?page=manual)")
